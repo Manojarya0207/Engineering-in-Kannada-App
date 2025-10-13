@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:google_fonts/google_fonts.dart'; // Allowed package for custom fonts
 import 'package:animations/animations.dart'; // Allowed package for transitions
+import 'package:collection/collection.dart'; // Allowed package for extensions like firstWhereOrNull
 
 /// ----------------------
 /// Data Model for App User
@@ -12,15 +13,30 @@ class AppUser {
   final String email;
   final String displayName;
   final String role;
-  final String? phoneNumber; // Added phone number
+  final String? phoneNumber;
 
   AppUser({
     required this.uid,
     required this.email,
     required this.displayName,
     required this.role,
-    this.phoneNumber, // Make nullable for existing mock users or if not provided
+    this.phoneNumber,
   });
+
+  /// Creates a new AppUser instance with updated fields.
+  AppUser copyWith({
+    String? displayName,
+    String? email,
+    String? phoneNumber,
+  }) {
+    return AppUser(
+      uid: uid,
+      email: email ?? this.email,
+      displayName: displayName ?? this.displayName,
+      role: role,
+      phoneNumber: phoneNumber ?? this.phoneNumber,
+    );
+  }
 }
 
 /// ----------------------
@@ -49,13 +65,18 @@ class AuthService extends ChangeNotifier {
   AppUser? _currentUser;
   AppUser? get currentUser => _currentUser;
 
-  // Mock database for registered users
+  // Mock database for registered users, keyed by email
   final Map<String, AppUser> _registeredUsers = <String, AppUser>{};
   int _nextUid = 1;
   int _nextNotificationId = 1;
 
   final List<NotificationItem> _notifications = <NotificationItem>[];
   List<NotificationItem> get notifications => List<NotificationItem>.unmodifiable(_notifications);
+
+  // Map: userId -> set of userIds they follow
+  final Map<String, Set<String>> _following = <String, Set<String>>{};
+  // Map: userId -> set of userIds that follow them
+  final Map<String, Set<String>> _followers = <String, Set<String>>{};
 
   // All available roles, including admin, for internal system use
   static const List<String> availableRoles = <String>['student', 'teacher', 'admin'];
@@ -66,27 +87,39 @@ class AuthService extends ChangeNotifier {
 
   AuthService() {
     // Initialize with some mock users for demonstration
-    _registeredUsers['test@example.com'] = AppUser(
+    final AppUser studentUser = AppUser(
       uid: 'mock-uid-1',
       email: 'test@example.com',
       displayName: 'Test Student',
       role: 'student',
       phoneNumber: '111-222-3333',
     );
-    _registeredUsers['teacher@example.com'] = AppUser(
+    final AppUser teacherUser = AppUser(
       uid: 'mock-uid-2',
       email: 'teacher@example.com',
       displayName: 'Teacher Name',
       role: 'teacher',
       phoneNumber: '444-555-6666',
     );
-    _registeredUsers['manojarya0207@gmail.com'] = AppUser(
+    final AppUser adminUser = AppUser(
       uid: 'mock-uid-3',
       email: 'manojarya0207@gmail.com',
       displayName: 'manojarya0207',
       role: 'admin',
       phoneNumber: '777-888-9999',
     );
+    final AppUser googleMockUser = AppUser(
+      uid: 'mock-uid-google',
+      email: 'google_mock_user@example.com',
+      displayName: 'Google Mock User',
+      role: 'student',
+      phoneNumber: null,
+    );
+
+    _registeredUsers[studentUser.email] = studentUser;
+    _registeredUsers[teacherUser.email] = teacherUser;
+    _registeredUsers[adminUser.email] = adminUser;
+    _registeredUsers[googleMockUser.email] = googleMockUser;
     _nextUid = 4; // Start UIDs from next available
 
     // Initialize with some mock notifications
@@ -112,6 +145,29 @@ class AuthService extends ChangeNotifier {
       targetRole: 'all',
     ));
     _nextNotificationId = 4;
+
+    // Initialize connection maps for mock users
+    for (final AppUser user in _registeredUsers.values) {
+      _ensureUserInConnections(user.uid);
+    }
+
+    // Example: Test Student follows Teacher
+    _following['mock-uid-1']!.add('mock-uid-2');
+    _followers['mock-uid-2']!.add('mock-uid-1');
+
+    // Example: Admin follows Test Student
+    _following['mock-uid-3']!.add('mock-uid-1');
+    _followers['mock-uid-1']!.add('mock-uid-3');
+
+    // Example: Teacher follows Google Mock User
+    _following['mock-uid-2']!.add('mock-uid-google');
+    _followers['mock-uid-google']!.add('mock-uid-2');
+  }
+
+  /// Helper to ensure a user's UID exists in the connections maps.
+  void _ensureUserInConnections(String uid) {
+    _following.putIfAbsent(uid, () => <String>{});
+    _followers.putIfAbsent(uid, () => <String>{});
   }
 
   /// Register a new user with email and password.
@@ -121,7 +177,7 @@ class AuthService extends ChangeNotifier {
     required String password,
     required String name,
     required String role,
-    required String? phoneNumber, // Now required as a parameter, can be null if not provided
+    required String? phoneNumber,
   }) async {
     // Simulate network delay
     await Future<void>.delayed(const Duration(milliseconds: 500));
@@ -142,10 +198,11 @@ class AuthService extends ChangeNotifier {
       email: email,
       displayName: name,
       role: role,
-      phoneNumber: phoneNumber, // Store the provided phone number
+      phoneNumber: phoneNumber,
     );
     _registeredUsers[email] = newUser;
     _currentUser = newUser;
+    _ensureUserInConnections(newUser.uid); // Initialize connection sets for new user
     notifyListeners();
     return null; // Success
   }
@@ -184,9 +241,10 @@ class AuthService extends ChangeNotifier {
         email: mockEmail,
         displayName: 'Google Mock User',
         role: defaultRole,
-        phoneNumber: null, // Google sign-in doesn't provide phone in this mock
+        phoneNumber: null,
       );
       _registeredUsers[mockEmail] = user;
+      _ensureUserInConnections(user.uid); // Initialize connection sets for new user
     }
     _currentUser = user;
     notifyListeners();
@@ -201,16 +259,121 @@ class AuthService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Updates the profile of a user.
+  Future<String?> updateUserProfile({
+    required String uid,
+    String? displayName,
+    String? email,
+    String? phoneNumber,
+  }) async {
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+
+    final AppUser? existingUser =
+        _registeredUsers.values.firstWhereOrNull((AppUser user) => user.uid == uid);
+
+    if (existingUser == null) {
+      return 'User not found.';
+    }
+
+    // If email is changing, check for conflicts with other users
+    if (email != null && email != existingUser.email && _registeredUsers.containsKey(email)) {
+      return 'Email already taken by another user.';
+    }
+
+    final AppUser updatedUser = existingUser.copyWith(
+      displayName: displayName,
+      email: email,
+      phoneNumber: phoneNumber,
+    );
+
+    // If email changed, remove the old entry and add with the new email as key
+    if (email != null && email != existingUser.email) {
+      _registeredUsers.remove(existingUser.email);
+      _registeredUsers[email] = updatedUser;
+    } else {
+      // Update existing entry (replace AppUser object)
+      _registeredUsers[existingUser.email] = updatedUser;
+    }
+
+    // Update current user if it's the one being edited
+    if (_currentUser?.uid == uid) {
+      _currentUser = updatedUser;
+    }
+    notifyListeners();
+    return null;
+  }
+
+  /// Follows a target user.
+  Future<String?> followUser({required String followerUid, required String targetUid}) async {
+    if (followerUid == targetUid) return 'Cannot follow yourself.';
+    if (!_registeredUsers.values.any((AppUser u) => u.uid == followerUid)) return 'Follower user not found.';
+    if (!_registeredUsers.values.any((AppUser u) => u.uid == targetUid)) return 'Target user not found.';
+
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    _ensureUserInConnections(followerUid);
+    _ensureUserInConnections(targetUid);
+
+    final bool added = _following[followerUid]!.add(targetUid);
+    if (added) {
+      _followers[targetUid]!.add(followerUid);
+      notifyListeners();
+    }
+    return null;
+  }
+
+  /// Unfollows a target user.
+  Future<String?> unfollowUser({required String followerUid, required String targetUid}) async {
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    _ensureUserInConnections(followerUid);
+    _ensureUserInConnections(targetUid);
+
+    final bool removed = _following[followerUid]!.remove(targetUid);
+    if (removed) {
+      _followers[targetUid]!.remove(followerUid);
+      notifyListeners();
+    }
+    return null;
+  }
+
+  /// Gets the UIDs of users that a given user is following.
+  Set<String> getFollowingUids(String uid) {
+    _ensureUserInConnections(uid);
+    return Set<String>.unmodifiable(_following[uid]!);
+  }
+
+  /// Gets the UIDs of users who are following a given user.
+  Set<String> getFollowerUids(String uid) {
+    _ensureUserInConnections(uid);
+    return Set<String>.unmodifiable(_followers[uid]!);
+  }
+
+  /// Helper to get AppUser objects from a set of UIDs.
+  List<AppUser> getUsersFromUids(Set<String> uids) {
+    return _registeredUsers.values.where((AppUser user) => uids.contains(user.uid)).toList();
+  }
+
   /// For admin purposes: get a list of all registered users.
-  /// In a real application, this would have proper authorization checks.
   List<AppUser> getAllUsers() {
     return _registeredUsers.values.toList();
   }
 
   /// For admin purposes: delete a user by email.
-  /// In a real application, this would have proper authorization checks.
   void deleteUserByEmail(String email) {
+    final AppUser? userToDelete = _registeredUsers[email];
+    if (userToDelete == null) return;
+
     _registeredUsers.remove(email);
+
+    // Clean up followers/following data
+    _following.remove(userToDelete.uid);
+    _followers.remove(userToDelete.uid);
+    for (final Set<String> uids in _following.values) {
+      uids.remove(userToDelete.uid);
+    }
+    for (final Set<String> uids in _followers.values) {
+      uids.remove(userToDelete.uid);
+    }
+
     // If the deleted user was the current user, log them out
     if (_currentUser?.email == email) {
       _currentUser = null;
@@ -268,22 +431,51 @@ class MyApp extends StatelessWidget {
             colorScheme: colorScheme,
             // Integrate GoogleFonts for a professional typography
             textTheme: GoogleFonts.latoTextTheme(Theme.of(context).textTheme).copyWith(
-              headlineSmall: GoogleFonts.lato(
-                textStyle: Theme.of(context).textTheme.headlineSmall,
+              headlineMedium: GoogleFonts.lato(
+                textStyle: Theme.of(context).textTheme.headlineMedium?.copyWith(fontSize: 24), // Reduced from ~28
                 fontWeight: FontWeight.bold,
               ),
-              headlineMedium: GoogleFonts.lato(
-                textStyle: Theme.of(context).textTheme.headlineMedium,
+              headlineSmall: GoogleFonts.lato(
+                textStyle: Theme.of(context).textTheme.headlineSmall?.copyWith(fontSize: 20), // Reduced from ~24
                 fontWeight: FontWeight.bold,
               ),
               titleLarge: GoogleFonts.lato(
-                textStyle: Theme.of(context).textTheme.titleLarge,
+                textStyle: Theme.of(context).textTheme.titleLarge?.copyWith(fontSize: 18), // Reduced from ~22
                 fontWeight: FontWeight.bold,
+              ),
+              titleMedium: GoogleFonts.lato(
+                textStyle: Theme.of(context).textTheme.titleMedium?.copyWith(fontSize: 14), // Reduced from ~16
+              ),
+              titleSmall: GoogleFonts.lato(
+                textStyle: Theme.of(context).textTheme.titleSmall?.copyWith(fontSize: 12), // Reduced from ~14
+              ),
+              bodyLarge: GoogleFonts.lato(
+                textStyle: Theme.of(context).textTheme.bodyLarge?.copyWith(fontSize: 14), // Reduced from ~16
+              ),
+              bodyMedium: GoogleFonts.lato(
+                textStyle: Theme.of(context).textTheme.bodyMedium?.copyWith(fontSize: 12), // Reduced from ~14
+              ),
+              bodySmall: GoogleFonts.lato(
+                textStyle: Theme.of(context).textTheme.bodySmall?.copyWith(fontSize: 10), // Reduced from ~12
+              ),
+              labelLarge: GoogleFonts.lato(
+                textStyle: Theme.of(context).textTheme.labelLarge?.copyWith(fontSize: 12), // Reduced from ~14
+              ),
+              labelMedium: GoogleFonts.lato(
+                textStyle: Theme.of(context).textTheme.labelMedium?.copyWith(fontSize: 10), // Reduced from ~12
+              ),
+              labelSmall: GoogleFonts.lato(
+                textStyle: Theme.of(context).textTheme.labelSmall?.copyWith(fontSize: 9), // Reduced from ~11
               ),
             ),
             appBarTheme: AppBarTheme(
               backgroundColor: colorScheme.inversePrimary,
               foregroundColor: colorScheme.onPrimaryContainer,
+              // Potentially adjust title text style here if needed, but it should pick up titleLarge
+              titleTextStyle: GoogleFonts.lato(
+                textStyle: Theme.of(context).textTheme.titleLarge?.copyWith(fontSize: 18, fontWeight: FontWeight.bold),
+                color: colorScheme.onPrimaryContainer,
+              ),
             ),
             cardTheme: CardThemeData(
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -294,20 +486,20 @@ class MyApp extends StatelessWidget {
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
               ),
-              contentPadding: const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
+              contentPadding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16), // Reduced vertical padding
             ),
             elevatedButtonTheme: ElevatedButtonThemeData(
               style: ElevatedButton.styleFrom(
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                padding: const EdgeInsets.symmetric(vertical: 14), // Reduced vertical padding
+                textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold), // Reduced font size
               ),
             ),
             outlinedButtonTheme: OutlinedButtonThemeData(
               style: OutlinedButton.styleFrom(
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                padding: const EdgeInsets.symmetric(vertical: 14), // Reduced vertical padding
+                textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold), // Reduced font size
               ),
             ),
           ),
@@ -477,7 +669,7 @@ class _LoginPageState extends State<LoginPage> {
                       const SizedBox(height: 16),
                       TextButton(
                         onPressed: _goRegister,
-                        child: const Text('Don\'t have an account? Register here.', style: TextStyle(fontSize: 14)),
+                        child: Text('Don\'t have an account? Register here.', style: Theme.of(context).textTheme.bodyMedium), // Adjusted from hardcoded 14
                       ),
                     ],
                   ),
@@ -504,8 +696,7 @@ class _RegisterPageState extends State<RegisterPage> {
   final TextEditingController _nameCtrl = TextEditingController();
   final TextEditingController _emailCtrl = TextEditingController();
   final TextEditingController _passCtrl = TextEditingController();
-  final TextEditingController _phoneCtrl = TextEditingController(); // New: phone number controller
-  // Initialize with the first role from userSelectableRoles, which excludes 'admin'.
+  final TextEditingController _phoneCtrl = TextEditingController();
   String _role = AuthService.userSelectableRoles.first;
   bool _loading = false;
 
@@ -514,7 +705,7 @@ class _RegisterPageState extends State<RegisterPage> {
     _nameCtrl.dispose();
     _passCtrl.dispose();
     _emailCtrl.dispose();
-    _phoneCtrl.dispose(); // Dispose phone controller
+    _phoneCtrl.dispose();
     super.dispose();
   }
 
@@ -522,7 +713,7 @@ class _RegisterPageState extends State<RegisterPage> {
     final String name = _nameCtrl.text.trim();
     final String email = _emailCtrl.text.trim();
     final String pass = _passCtrl.text.trim();
-    final String phone = _phoneCtrl.text.trim(); // Get phone number
+    final String phone = _phoneCtrl.text.trim();
 
     if (name.isEmpty || email.isEmpty || pass.isEmpty || phone.isEmpty) {
       if (!mounted) return;
@@ -536,7 +727,7 @@ class _RegisterPageState extends State<RegisterPage> {
       password: pass,
       name: name,
       role: _role,
-      phoneNumber: phone, // Pass phone number to service
+      phoneNumber: phone,
     );
     if (!mounted) return;
     setState(() => _loading = false);
@@ -553,7 +744,7 @@ class _RegisterPageState extends State<RegisterPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Theme.of(context).colorScheme.surfaceVariant, // Added for "under color"
+      backgroundColor: Theme.of(context).colorScheme.surfaceVariant,
       appBar: AppBar(title: const Text('Create Account')),
       body: Center(
         child: SingleChildScrollView(
@@ -600,7 +791,7 @@ class _RegisterPageState extends State<RegisterPage> {
                       ),
                       const SizedBox(height: 16),
                       TextField(
-                        controller: _phoneCtrl, // New: phone number field
+                        controller: _phoneCtrl,
                         keyboardType: TextInputType.phone,
                         decoration: const InputDecoration(
                           labelText: 'Phone Number',
@@ -720,24 +911,24 @@ class UserDashboardPage extends StatelessWidget {
           const SizedBox(height: 10),
           Expanded(
             child: ListView(
-              children: const <Widget>[
+              children: <Widget>[
                 ListTile(
-                  leading: Icon(Icons.event),
-                  title: Text('Team Meeting'),
-                  subtitle: Text('Tomorrow, 10:00 AM'),
-                  trailing: Chip(label: Text('High')),
+                  leading: const Icon(Icons.event),
+                  title: Text('Team Meeting', style: Theme.of(context).textTheme.bodyLarge),
+                  subtitle: Text('Tomorrow, 10:00 AM', style: Theme.of(context).textTheme.bodySmall),
+                  trailing: Chip(label: Text('High', style: Theme.of(context).textTheme.labelMedium)),
                 ),
-                Divider(),
+                const Divider(),
                 ListTile(
-                  leading: Icon(Icons.assignment),
-                  title: Text('Project Alpha Submission'),
-                  subtitle: Text('Next Friday'),
+                  leading: const Icon(Icons.assignment),
+                  title: Text('Project Alpha Submission', style: Theme.of(context).textTheme.bodyLarge),
+                  subtitle: Text('Next Friday', style: Theme.of(context).textTheme.bodySmall),
                 ),
-                Divider(),
+                const Divider(),
                 ListTile(
-                  leading: Icon(Icons.school),
-                  title: Text('New Course: Advanced AI'),
-                  subtitle: Text('Starts next month'),
+                  leading: const Icon(Icons.school),
+                  title: Text('New Course: Advanced AI', style: Theme.of(context).textTheme.bodyLarge),
+                  subtitle: Text('Starts next month', style: Theme.of(context).textTheme.bodySmall),
                 ),
               ],
             ),
@@ -748,10 +939,354 @@ class UserDashboardPage extends StatelessWidget {
   }
 }
 
+/// ----------------------
+/// Edit Profile Page (New)
+/// ----------------------
+class EditProfilePage extends StatefulWidget {
+  final AppUser user;
+  const EditProfilePage({super.key, required this.user});
+
+  @override
+  State<EditProfilePage> createState() => _EditProfilePageState();
+}
+
+class _EditProfilePageState extends State<EditProfilePage> {
+  late final TextEditingController _displayNameCtrl;
+  late final TextEditingController _emailCtrl;
+  late final TextEditingController _phoneCtrl;
+  bool _loading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _displayNameCtrl = TextEditingController(text: widget.user.displayName);
+    _emailCtrl = TextEditingController(text: widget.user.email);
+    _phoneCtrl = TextEditingController(text: widget.user.phoneNumber ?? '');
+  }
+
+  @override
+  void dispose() {
+    _displayNameCtrl.dispose();
+    _emailCtrl.dispose();
+    _phoneCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _saveProfile() async {
+    final String newDisplayName = _displayNameCtrl.text.trim();
+    final String newEmail = _emailCtrl.text.trim();
+    final String newPhoneNumber = _phoneCtrl.text.trim();
+
+    if (newDisplayName.isEmpty || newEmail.isEmpty) {
+      if (!mounted) return;
+      return _showSnackBar(context, 'Display Name and Email cannot be empty.');
+    }
+    if (!RegExp(r'^[^@]+@[^@]+\.[^@]+').hasMatch(newEmail)) {
+      if (!mounted) return;
+      return _showSnackBar(context, 'Please enter a valid email address.');
+    }
+
+    setState(() => _loading = true);
+    final AuthService authService = context.read<AuthService>();
+    final String? error = await authService.updateUserProfile(
+      uid: widget.user.uid,
+      displayName: newDisplayName,
+      email: newEmail,
+      phoneNumber: newPhoneNumber.isNotEmpty ? newPhoneNumber : null,
+    );
+    if (!mounted) return;
+    setState(() => _loading = false);
+
+    if (error != null) {
+      _showSnackBar(context, error);
+    } else {
+      _showSnackBar(context, 'Profile updated successfully!');
+      if (!mounted) return;
+      Navigator.of(context).pop();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Theme.of(context).colorScheme.surfaceVariant,
+      appBar: AppBar(
+        title: const Text('Edit Profile'),
+      ),
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24.0),
+          child: Card(
+            child: Padding(
+              padding: const EdgeInsets.all(20.0),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  TextField(
+                    controller: _displayNameCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Display Name',
+                      prefixIcon: Icon(Icons.person),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: _emailCtrl,
+                    keyboardType: TextInputType.emailAddress,
+                    decoration: const InputDecoration(
+                      labelText: 'Email',
+                      prefixIcon: Icon(Icons.email),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: _phoneCtrl,
+                    keyboardType: TextInputType.phone,
+                    decoration: const InputDecoration(
+                      labelText: 'Phone Number (Optional)',
+                      prefixIcon: Icon(Icons.phone),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: _loading ? null : _saveProfile,
+                      child: _loading
+                          ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Text('Save Changes'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// ----------------------
+/// User Connections Page (New)
+/// ----------------------
+class UserConnectionsPage extends StatefulWidget {
+  final AppUser user;
+  const UserConnectionsPage({super.key, required this.user});
+
+  @override
+  State<UserConnectionsPage> createState() => _UserConnectionsPageState();
+}
+
+class _UserConnectionsPageState extends State<UserConnectionsPage> with SingleTickerProviderStateMixin {
+  late TabController _tabController;
+  final TextEditingController _searchCtrl = TextEditingController();
+  String _searchQuery = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(length: 2, vsync: this);
+    _searchCtrl.addListener(_onSearchChanged);
+  }
+
+  void _onSearchChanged() {
+    setState(() {
+      _searchQuery = _searchCtrl.text.trim().toLowerCase();
+    });
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    _searchCtrl.removeListener(_onSearchChanged);
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final AuthService authService = context.watch<AuthService>();
+    final List<AppUser> allUsers = authService.getAllUsers();
+    final Set<String> followingUids = authService.getFollowingUids(widget.user.uid);
+    final Set<String> followerUids = authService.getFollowerUids(widget.user.uid);
+
+    final List<AppUser> followingUsers = authService.getUsersFromUids(followingUids);
+    final List<AppUser> followersUsers = authService.getUsersFromUids(followerUids);
+
+    // Filter users for search based on display name or email
+    final List<AppUser> searchableUsers = allUsers
+        .where((AppUser user) =>
+            user.uid != widget.user.uid &&
+            (user.displayName.toLowerCase().contains(_searchQuery) ||
+                user.email.toLowerCase().contains(_searchQuery)))
+        .toList();
+
+    return Scaffold(
+      backgroundColor: Theme.of(context).colorScheme.surfaceVariant,
+      appBar: AppBar(
+        title: const Text('Connections'),
+        bottom: TabBar(
+          controller: _tabController,
+          tabs: const <Tab>[
+            Tab(text: 'Following'),
+            Tab(text: 'Followers'),
+          ],
+        ),
+      ),
+      body: Column(
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: TextField(
+              controller: _searchCtrl,
+              decoration: InputDecoration(
+                labelText: 'Search users to follow',
+                prefixIcon: const Icon(Icons.search),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
+          ),
+          if (_searchQuery.isNotEmpty)
+            Expanded(
+              child: searchableUsers.isEmpty
+                  ? Center(
+                      child: Text(
+                        'No users found for "$_searchQuery".',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                    )
+                  : ListView.builder(
+                      itemCount: searchableUsers.length,
+                      itemBuilder: (BuildContext context, int index) {
+                        final AppUser targetUser = searchableUsers[index];
+                        final bool isFollowing = followingUids.contains(targetUser.uid);
+                        return Card(
+                          margin: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 4.0),
+                          child: ListTile(
+                            leading: CircleAvatar(child: Text(targetUser.displayName[0], style: Theme.of(context).textTheme.labelLarge)),
+                            title: Text(targetUser.displayName, style: Theme.of(context).textTheme.bodyLarge),
+                            subtitle: Text(targetUser.email, style: Theme.of(context).textTheme.bodySmall),
+                            trailing: isFollowing
+                                ? OutlinedButton(
+                                    onPressed: () async {
+                                      final String? error = await authService.unfollowUser(
+                                          followerUid: widget.user.uid, targetUid: targetUser.uid);
+                                      if (!mounted) return;
+                                      if (error != null) _showSnackBar(context, error);
+                                    },
+                                    child: const Text('Unfollow'),
+                                  )
+                                : ElevatedButton(
+                                    onPressed: () async {
+                                      final String? error = await authService.followUser(
+                                          followerUid: widget.user.uid, targetUid: targetUser.uid);
+                                      if (!mounted) return;
+                                      if (error != null) _showSnackBar(context, error);
+                                    },
+                                    child: const Text('Follow'),
+                                  ),
+                          ),
+                        );
+                      },
+                    ),
+            )
+          else
+            Expanded(
+              child: TabBarView(
+                controller: _tabController,
+                children: <Widget>[
+                  _buildConnectionList(context, followingUsers, 'No one followed yet.'),
+                  _buildConnectionList(context, followersUsers, 'No followers yet.'),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildConnectionList(BuildContext context, List<AppUser> users, String emptyMessage) {
+    if (users.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: <Widget>[
+            Icon(Icons.person_off, size: 60, color: Colors.grey[400]),
+            const SizedBox(height: 16),
+            Text(emptyMessage, style: Theme.of(context).textTheme.titleMedium),
+          ],
+        ),
+      );
+    }
+    final AuthService authService = context.read<AuthService>();
+    final Set<String> followingUids = authService.getFollowingUids(widget.user.uid);
+
+    return ListView.builder(
+      itemCount: users.length,
+      itemBuilder: (BuildContext context, int index) {
+        final AppUser connectionUser = users[index];
+        final bool isFollowing = followingUids.contains(connectionUser.uid);
+        return Card(
+          margin: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 4.0),
+          child: ListTile(
+            leading: CircleAvatar(child: Text(connectionUser.displayName[0], style: Theme.of(context).textTheme.labelLarge)),
+            title: Text(connectionUser.displayName, style: Theme.of(context).textTheme.bodyLarge),
+            subtitle: Text(connectionUser.email, style: Theme.of(context).textTheme.bodySmall),
+            trailing: connectionUser.uid == widget.user.uid // Don't show button for self
+                ? null
+                : isFollowing
+                    ? OutlinedButton(
+                        onPressed: () async {
+                          final String? error = await authService.unfollowUser(
+                              followerUid: widget.user.uid, targetUid: connectionUser.uid);
+                          if (!mounted) return;
+                          if (error != null) _showSnackBar(context, error);
+                        },
+                        child: const Text('Unfollow'),
+                      )
+                    : ElevatedButton(
+                        onPressed: () async {
+                          final String? error = await authService.followUser(
+                              followerUid: widget.user.uid, targetUid: connectionUser.uid);
+                          if (!mounted) return;
+                          if (error != null) _showSnackBar(context, error);
+                        },
+                        child: const Text('Follow'),
+                      ),
+            onTap: () {
+              // Optionally navigate to connectionUser's profile
+              _showSnackBar(context, 'View profile for ${connectionUser.displayName}');
+            },
+          ),
+        );
+      },
+    );
+  }
+}
+
 class UserProfilePage extends StatelessWidget {
   final AppUser user;
 
   const UserProfilePage({super.key, required this.user});
+
+  void _navigateToEditProfile(BuildContext context, AppUser user) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (BuildContext context) => EditProfilePage(user: user),
+      ),
+    );
+  }
+
+  void _navigateToConnections(BuildContext context, AppUser user) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (BuildContext context) => UserConnectionsPage(user: user),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -806,11 +1341,18 @@ class UserProfilePage extends StatelessWidget {
           SizedBox(
             width: double.infinity,
             child: OutlinedButton.icon(
-              onPressed: () {
-                _showSnackBar(context, 'Edit profile feature coming soon!');
-              },
+              onPressed: () => _navigateToEditProfile(context, user),
               icon: const Icon(Icons.edit),
               label: const Text('Edit Profile'),
+            ),
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: () => _navigateToConnections(context, user),
+              icon: const Icon(Icons.people),
+              label: const Text('Manage Connections'),
             ),
           ),
         ],
@@ -842,7 +1384,8 @@ class UserProfilePage extends StatelessWidget {
 }
 
 class AppSettingsPage extends StatelessWidget {
-  const AppSettingsPage({super.key});
+  final VoidCallback onLogout; // New: Callback for logout button
+  const AppSettingsPage({super.key, required this.onLogout});
 
   @override
   Widget build(BuildContext context) {
@@ -861,7 +1404,7 @@ class AppSettingsPage extends StatelessWidget {
               children: <Widget>[
                 ListTile(
                   leading: Icon(Icons.notifications, color: Theme.of(context).colorScheme.primary),
-                  title: const Text('Notifications'),
+                  title: Text('Notifications', style: Theme.of(context).textTheme.bodyLarge),
                   trailing: Switch(
                     value: true,
                     onChanged: (bool value) {
@@ -872,7 +1415,7 @@ class AppSettingsPage extends StatelessWidget {
                 const Divider(indent: 16, endIndent: 16),
                 ListTile(
                   leading: Icon(Icons.language, color: Theme.of(context).colorScheme.primary),
-                  title: const Text('Language'),
+                  title: Text('Language', style: Theme.of(context).textTheme.bodyLarge),
                   trailing: DropdownButton<String>(
                     value: 'English',
                     onChanged: (String? newValue) {
@@ -882,14 +1425,14 @@ class AppSettingsPage extends StatelessWidget {
                     },
                     items: <String>['English', 'Spanish', 'French']
                         .map<DropdownMenuItem<String>>((String value) {
-                      return DropdownMenuItem<String>(value: value, child: Text(value));
+                      return DropdownMenuItem<String>(value: value, child: Text(value, style: Theme.of(context).textTheme.bodyMedium));
                     }).toList(),
                   ),
                 ),
                 const Divider(indent: 16, endIndent: 16),
                 ListTile(
                   leading: Icon(Icons.security, color: Theme.of(context).colorScheme.primary),
-                  title: const Text('Security'),
+                  title: Text('Security', style: Theme.of(context).textTheme.bodyLarge),
                   onTap: () {
                     _showSnackBar(context, 'Security settings opened!');
                   },
@@ -906,24 +1449,37 @@ class AppSettingsPage extends StatelessWidget {
           Card(
             child: Column(
               children: <Widget>[
-                const ListTile(
-                  leading: Icon(Icons.info_outline),
-                  title: Text('Version'),
-                  trailing: Text('1.0.0'),
+                ListTile(
+                  leading: const Icon(Icons.info_outline),
+                  title: Text('Version', style: Theme.of(context).textTheme.bodyLarge),
+                  trailing: Text('1.0.0', style: Theme.of(context).textTheme.bodyMedium),
                 ),
                 const Divider(indent: 16, endIndent: 16),
                 ListTile(
                   leading: Icon(Icons.description, color: Theme.of(context).colorScheme.primary),
-                  title: const Text('Terms of Service'),
+                  title: Text('Terms of Service', style: Theme.of(context).textTheme.bodyLarge),
                   onTap: () => _showSnackBar(context, 'Terms of Service opened!'),
                 ),
                 const Divider(indent: 16, endIndent: 16),
                 ListTile(
                   leading: Icon(Icons.privacy_tip, color: Theme.of(context).colorScheme.primary),
-                  title: const Text('Privacy Policy'),
+                  title: Text('Privacy Policy', style: Theme.of(context).textTheme.bodyLarge),
                   onTap: () => _showSnackBar(context, 'Privacy Policy opened!'),
                 ),
               ],
+            ),
+          ),
+          const SizedBox(height: 30), // Added spacing before logout button
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: onLogout, // Call the logout callback
+              icon: const Icon(Icons.logout),
+              label: const Text('Logout'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Theme.of(context).colorScheme.error,
+                foregroundColor: Theme.of(context).colorScheme.onError,
+              ),
             ),
           ),
         ],
@@ -974,15 +1530,15 @@ class StudentCoursesPage extends StatelessWidget {
               children: <Widget>[
                 ListTile(
                   leading: const Icon(Icons.add_box),
-                  title: const Text('Advanced Data Structures'),
-                  subtitle: const Text('Available now'),
+                  title: Text('Advanced Data Structures', style: Theme.of(context).textTheme.bodyLarge),
+                  subtitle: Text('Available now', style: Theme.of(context).textTheme.bodySmall),
                   trailing: ElevatedButton(onPressed: () => _showSnackBar(context, 'Enrolling...'), child: const Text('Enroll')),
                 ),
                 const Divider(indent: 16, endIndent: 16),
                 ListTile(
                   leading: const Icon(Icons.add_box),
-                  title: const Text('Machine Learning Fundamentals'),
-                  subtitle: const Text('Starts next month'),
+                  title: Text('Machine Learning Fundamentals', style: Theme.of(context).textTheme.bodyLarge),
+                  subtitle: Text('Starts next month', style: Theme.of(context).textTheme.bodySmall),
                   trailing: ElevatedButton(onPressed: () => _showSnackBar(context, 'Enrolling...'), child: const Text('Enroll')),
                 ),
               ],
@@ -996,9 +1552,9 @@ class StudentCoursesPage extends StatelessWidget {
   Widget _buildCourseTile(BuildContext context, String title, String teacher, String status) {
     return ListTile(
       leading: const Icon(Icons.book),
-      title: Text(title),
-      subtitle: Text('Teacher: $teacher'),
-      trailing: Chip(label: Text(status)),
+      title: Text(title, style: Theme.of(context).textTheme.bodyLarge),
+      subtitle: Text('Teacher: $teacher', style: Theme.of(context).textTheme.bodySmall),
+      trailing: Chip(label: Text(status, style: Theme.of(context).textTheme.labelMedium)),
       onTap: () => _showSnackBar(context, 'Opened course: $title'),
     );
   }
@@ -1103,7 +1659,7 @@ class _TeacherManagementPageState extends State<TeacherManagementPage> {
       context: context,
       builder: (BuildContext dialogContext) {
         return AlertDialog(
-          title: const Text('Send New Notification'),
+          title: Text('Send New Notification', style: Theme.of(dialogContext).textTheme.titleLarge),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -1128,7 +1684,7 @@ class _TeacherManagementPageState extends State<TeacherManagementPage> {
                   items: <String>['student', 'all'].map<DropdownMenuItem<String>>((String role) {
                     return DropdownMenuItem<String>(
                       value: role,
-                      child: Text(role[0].toUpperCase() + role.substring(1) + (role == 'all' ? ' Users' : 's')),
+                      child: Text(role[0].toUpperCase() + role.substring(1) + (role == 'all' ? ' Users' : 's'), style: Theme.of(dialogContext).textTheme.bodyMedium),
                     );
                   }).toList(),
                   onChanged: (String? value) {
@@ -1207,15 +1763,15 @@ class _TeacherManagementPageState extends State<TeacherManagementPage> {
               children: <Widget>[
                 ListTile(
                   leading: const Icon(Icons.assignment),
-                  title: const Text('Grade Programming Assignments'),
-                  subtitle: const Text('Due: End of week'),
+                  title: Text('Grade Programming Assignments', style: Theme.of(context).textTheme.bodyLarge),
+                  subtitle: Text('Due: End of week', style: Theme.of(context).textTheme.bodySmall),
                   trailing: ElevatedButton(onPressed: () => _showSnackBar(context, 'Grading...'), child: const Text('Grade')),
                 ),
                 const Divider(indent: 16, endIndent: 16),
                 ListTile(
                   leading: const Icon(Icons.message),
-                  title: const Text('Respond to student emails'),
-                  subtitle: const Text('5 unread'),
+                  title: Text('Respond to student emails', style: Theme.of(context).textTheme.bodyLarge),
+                  subtitle: Text('5 unread', style: Theme.of(context).textTheme.bodySmall),
                   trailing: ElevatedButton(onPressed: () => _showSnackBar(context, 'Opening Inbox...'), child: const Text('View')),
                 ),
               ],
@@ -1238,8 +1794,8 @@ class _TeacherManagementPageState extends State<TeacherManagementPage> {
   Widget _buildClassTile(BuildContext context, String className, int studentCount) {
     return ListTile(
       leading: const Icon(Icons.class_),
-      title: Text(className),
-      subtitle: Text('$studentCount Students'),
+      title: Text(className, style: Theme.of(context).textTheme.bodyLarge),
+      subtitle: Text('$studentCount Students', style: Theme.of(context).textTheme.bodySmall),
       trailing: IconButton(
         icon: const Icon(Icons.arrow_forward),
         onPressed: () => _showSnackBar(context, 'View class: $className'),
@@ -1282,8 +1838,8 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
       context: context,
       builder: (BuildContext dialogContext) {
         return AlertDialog(
-          title: const Text('Confirm Deletion'),
-          content: Text('Are you sure you want to delete user "$displayName" ($email)? This action cannot be undone.'),
+          title: Text('Confirm Deletion', style: Theme.of(dialogContext).textTheme.titleLarge),
+          content: Text('Are you sure you want to delete user "$displayName" ($email)? This action cannot be undone.', style: Theme.of(dialogContext).textTheme.bodyMedium),
           actions: <Widget>[
             TextButton(
               onPressed: () => Navigator.of(dialogContext).pop(false),
@@ -1319,7 +1875,7 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
       context: context,
       builder: (BuildContext dialogContext) {
         return AlertDialog(
-          title: const Text('Send New Notification'),
+          title: Text('Send New Notification', style: Theme.of(dialogContext).textTheme.titleLarge),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -1345,7 +1901,7 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
                       .map<DropdownMenuItem<String>>((String role) {
                     return DropdownMenuItem<String>(
                       value: role,
-                      child: Text(role[0].toUpperCase() + role.substring(1) + (role == 'all' ? ' Users' : 's')),
+                      child: Text(role[0].toUpperCase() + role.substring(1) + (role == 'all' ? ' Users' : 's'), style: Theme.of(dialogContext).textTheme.bodyMedium),
                     );
                   }).toList(),
                   onChanged: (String? value) {
@@ -1414,10 +1970,10 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
                       children: _allUsers.map<Widget>((AppUser user) {
                         return ListTile(
                           leading: CircleAvatar(
-                            child: Text(user.displayName[0]),
+                            child: Text(user.displayName[0], style: Theme.of(context).textTheme.labelLarge),
                           ),
-                          title: Text(user.displayName),
-                          subtitle: Text('${user.email} (${user.role})' + (user.phoneNumber != null && user.phoneNumber!.isNotEmpty ? ' / ${user.phoneNumber}' : '')),
+                          title: Text(user.displayName, style: Theme.of(context).textTheme.bodyLarge),
+                          subtitle: Text('${user.email} (${user.role})' + (user.phoneNumber != null && user.phoneNumber!.isNotEmpty ? ' / ${user.phoneNumber}' : ''), style: Theme.of(context).textTheme.bodySmall),
                           trailing: IconButton(
                             icon: const Icon(Icons.delete, color: Colors.red),
                             onPressed: () => _deleteUser(user.uid, user.email, user.displayName),
@@ -1524,6 +2080,9 @@ class _HomePageState extends State<HomePage> {
     _bottomNavBarItems.add(const BottomNavigationBarItem(icon: Icon(Icons.home), label: 'Home'));
 
     _pageTitles.add('Profile');
+    // Ensure the UserProfilePage receives the latest user data via the provider.
+    // The profile page will now watch for user changes itself if needed,
+    // or rely on its parent (HomePage) being rebuilt.
     _pages.add(UserProfilePage(user: widget.user));
     _bottomNavBarItems.add(const BottomNavigationBarItem(icon: Icon(Icons.person), label: 'Profile'));
 
@@ -1549,7 +2108,7 @@ class _HomePageState extends State<HomePage> {
 
     // Common settings page for all
     _pageTitles.add('Settings');
-    _pages.add(const AppSettingsPage());
+    _pages.add(AppSettingsPage(onLogout: _signOut)); // Pass the signOut callback here
     _bottomNavBarItems.add(const BottomNavigationBarItem(icon: Icon(Icons.settings), label: 'Settings'));
 
     // Reset selected index if the number of tabs changes or role changes
@@ -1575,8 +2134,8 @@ class _HomePageState extends State<HomePage> {
       context: context,
       builder: (BuildContext dialogContext) {
         return AlertDialog(
-          title: const Text('Confirm Logout'),
-          content: const Text('Are you sure you want to log out of your account?'),
+          title: Text('Confirm Logout', style: Theme.of(dialogContext).textTheme.titleLarge),
+          content: Text('Are you sure you want to log out of your account?', style: Theme.of(dialogContext).textTheme.bodyMedium),
           actions: <Widget>[
             TextButton(
               onPressed: () => Navigator.of(dialogContext).pop(false),
@@ -1609,10 +2168,23 @@ class _HomePageState extends State<HomePage> {
   @override
   void didUpdateWidget(covariant HomePage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Re-initialize content if the user object (specifically the role) changes.
-    // Also, if _isLoadingRefresh changes, the dashboard page needs to be rebuilt,
-    // which happens via _initializeRoleSpecificContent implicitly by passing the new isLoading state.
-    if (widget.user.role != oldWidget.user.role) {
+    // Re-initialize content if the user object (specifically the role or any part of user) changes.
+    // Since AppUser is immutable, any change means a new instance, so direct comparison `widget.user != oldWidget.user` would be enough.
+    // However, specifically checking role also works. More robust to rebuild pages with current user data.
+    if (widget.user.role != oldWidget.user.role || widget.user.uid != oldWidget.user.uid) {
+      _initializeRoleSpecificContent(widget.user.role);
+    } else {
+      // Even if the user object itself has changed (e.g., display name updated), but role is same,
+      // the existing _pages list might still hold old user references.
+      // Rebuilding just the `UserProfilePage` and `UserDashboardPage` if the user object itself is new.
+      // The `_initializeRoleSpecificContent` already rebuilds all pages.
+      // So, if the user object changes, even without role change, a full re-init is necessary to pass the new user to sub-pages.
+      // Alternatively, the sub-pages could `context.watch<AuthService>().currentUser` directly.
+      // For consistency, let's keep the _initializeRoleSpecificContent call here.
+      // Given that `didUpdateWidget` is called only if the *parent* widget's properties change,
+      // and `HomePage` itself gets a new `user` if `AuthGate` rebuilds it with a new `currentUser`,
+      // `_initializeRoleSpecificContent` should be called.
+      // Let's refine `_initializeRoleSpecificContent` to ensure `UserDashboardPage` and `UserProfilePage` always get `widget.user`.
       _initializeRoleSpecificContent(widget.user.role);
     }
   }
@@ -1624,7 +2196,22 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title: Text(_pageTitles[_selectedIndex]),
         actions: <Widget>[
-          IconButton(onPressed: _signOut, icon: const Icon(Icons.logout)),
+          Padding(
+            padding: const EdgeInsets.only(right: 16.0),
+            child: GestureDetector(
+              onTap: () {
+                // Navigate to Profile page (index 1) when avatar is tapped
+                setState(() {
+                  _selectedIndex = 1;
+                });
+              },
+              child: CircleAvatar(
+                radius: 20,
+                backgroundImage: const NetworkImage('https://www.gstatic.com/flutter-onestack-prototype/genui/example_1.jpg'), // Placeholder image
+                backgroundColor: Theme.of(context).colorScheme.primary, // Fallback background
+              ),
+            ),
+          ),
         ],
       ),
       body: PageTransitionSwitcher(
@@ -1650,6 +2237,8 @@ class _HomePageState extends State<HomePage> {
         backgroundColor: Theme.of(context).colorScheme.surface,
         elevation: 8,
         type: BottomNavigationBarType.fixed,
+        selectedLabelStyle: Theme.of(context).textTheme.labelLarge, // Ensure label style is consistent
+        unselectedLabelStyle: Theme.of(context).textTheme.labelMedium, // Ensure label style is consistent
       ),
     );
   }
